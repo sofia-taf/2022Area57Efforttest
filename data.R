@@ -1,42 +1,29 @@
 ## Preprocess data, write TAF data tables
 
-## Before: Area37cuyrrentsofia.csv,
-##         EffortindexRousseaAugNominal.csv (bootstrap/data)
-## After:  catch_by_stock.png, catch_relative.png, catch_total.png,
-##         driors_2.png, input.rds (data)
-## Test again for R
-## Test 2
+## Before: catch.csv, effort.csv, priors.csv (bootstrap/data)
+## After:  catch_effort.csv, catch.png, driors.pdf, input.rds (data)
 
 library(TAF)
-library(dplyr)   # filter, group_by, left_join, mutate, summarise, ungroup
+library(SOFIA)
+suppressMessages(library(dplyr)) # filter, group_by, left_join, mutate, ...
 library(ggplot2)
-library(janitor) # clean_names
-library(purrr)   # map2
-library(sraplus) # format_driors, plot_driors
-library(stringr) # str_extract_all, str_replace_all, str_trim
+library(sraplus) # plot_driors
 library(tidyr)   # nest, pivot_longer
 
 mkdir("data")
 
 ## Read catch data, convert to tibble (long format)
-catch <- read.csv("bootstrap/data/democatch.csv")
-catch <- catch %>%
-  pivot_longer(-c(Year, Total), names_to="stock", values_to="capture") %>%
-  filter(!is.na(Year)) %>%
-  clean_names()
+catch <- read.taf("bootstrap/data/catch.csv")
+catch$Total <- NULL  # not used, not a stock
+catch <- pivot_longer(catch, !Year, "stock", values_to="capture")
+names(catch) <- tolower(names(catch))
 
 ## Plot catches
 catch %>%
   ggplot(aes(year, capture, color=stock)) +
   geom_line(show.legend=FALSE) +
   geom_point()
-ggsave("data/catch_by_stock.png")
-catch %>%
-  group_by(year) %>%
-  summarise(total_capture=sum(capture)) %>%
-  ggplot(aes(year, total_capture)) +
-  geom_line()
-ggsave("data/catch_total.png")
+ggsave("data/catch.png", width=16, height=8)
 
 ## Select stocks with min 10 years of non-zero catches...
 viable_stocks <- catch %>%
@@ -51,28 +38,14 @@ catch <- catch %>%
   filter(year > min(year[capture > 0]),
          year <= max(year[capture > 0]))
 
-## Plot relative catch
-catch %>%
-  group_by(stock) %>%
-  mutate(capture = capture / max(capture)) %>%
-  ggplot(aes(year, capture, group=stock)) +
-  geom_point()
-ggsave("data/catch_relative.png")
+## Add column 'taxa'
+catch$taxa <- catch$stock
 
-## Add columns 'stock_number_thing' and 'taxa'
-catch <- catch %>%
-  ungroup() %>%
-  mutate(stock_number_thing=str_extract_all(stock, "\\d")) %>%
-  mutate(taxa = str_replace_all(stock, "\\d", "")) %>%
-  mutate(taxa = str_replace_all(taxa, "\\.", " ") %>% str_trim()) %>%
-  mutate(taxa = str_replace_all(taxa, "  ", " ") %>% str_trim()) %>%
-  filter(!is.na(taxa))
-
-## Read effort data, add 'effort' column
-effort <- read.csv("bootstrap/data/EffortindexRousseaAugNominal.csv")
-index <- effort$E1
-catch_effort <- catch %>%
-  left_join(effort, by=c("year"="Year"))
+## Read effort data, combine catch and effort data
+effort <- read.taf("bootstrap/data/effort.csv")
+effort <- pivot_longer(effort, !Year, "stock", values_to="effort")
+names(effort) <- tolower(names(effort))
+catch_effort <- addEffort(catch, effort, same.effort=TRUE)
 
 ## Create nested tibble with 'data' column (catch and effort)
 stocks <- catch_effort %>%
@@ -80,37 +53,19 @@ stocks <- catch_effort %>%
   nest() %>%
   ungroup()
 
-## Read Priors data
-priors<-read.csv("bootstrap/data/priors.csv")
+## Read priors data, add as driors to stocks object
+priors <- read.taf("bootstrap/data/priors.csv")
+stocks <- addDriors(stocks, priors, same.priors=TRUE)
 
-## Add nested 'driors' column (data and priors)
-stocks <- stocks %>%
-  mutate(
-    driors=map2(
-      taxa,
-      data,
-      ~
-        format_driors(
-          taxa = .x,shape_prior=2,  # use_heuristics=TRUE, shape_prior=2,
-          catch = .y$capture,
-          years = .y$year,
-          initial_state = priors$initial_state, initial_state_cv=priors$initial_state_cv, b_ref_type = "k",
-          terminal_state = priors$terminal_state, terminal_state_cv = priors$terminal_state_cv,# Prior basis from MArcelos squid cuttlefish analysis in Med
-          effort = .y$E1[!is.na(.y$E1)], effort_years=.y$year[!is.na(.y$E1)],
-          growth_rate_prior = NA,
-          growth_rate_prior_cv = 0.2)
-      ## initial_state = 0.5,initial_state_cv = 0.25,b_ref_type = "k",
-      ## final_u = 1.2,final_u_cv = 0.25, f_ref_type = "fmsy"
-      ## sar = 4,
-      ## fmi = c(
-      ##   "research" = .5,
-      ##   "management" = .5,
-      ##   "enforcement" = .35,
-      ##   "socioeconomics" = 0.7
-      ## )
-    ))
+## Plot driors
+pdf("data/driors.pdf")
+for(i in seq_len(nrow(stocks)))
+{
+  suppressWarnings(print(plot_driors(stocks$driors[[i]]) +
+                         ggtitle(stocks$stock[i])))
+}
+dev.off()
+
+## Export stocks and catch_effort
 saveRDS(stocks, "data/input.rds")
-
-## Plot driors for one stock
-plot_driors(stocks$driors[[2]])  # stock 2 is Sardinella aurita
-ggsave("data/driors_2.png")
+write.taf(catch_effort, dir="data")
